@@ -61,7 +61,7 @@ This project recreates the Nintendo 3DS eShop experience in a web browser. It al
 
 1. Clone or download the repository:
 ```bash
-git clone https://github.com/your-username/3ds-eshop-clone.git
+git clone [https://github.com/your-username/3ds-eshop-clone.git](https://github.com/wildfirebill-nintendo-3ds/3ds-eshop-clone-sqlite.git)
 cd 3ds-eshop-clone
 ```
 
