@@ -56,6 +56,11 @@
                         </a>
                     </li>
                     <li class="nav-item">
+                        <a class="nav-link" href="#" data-section="seeds">
+                            <i class="bi bi-key"></i> Seeds
+                        </a>
+                    </li>
+                    <li class="nav-item">
                         <a class="nav-link" href="#" data-section="upload">
                             <i class="bi bi-cloud-upload"></i> Upload
                         </a>
@@ -267,6 +272,78 @@
             </div>
         </section>
 
+        <!-- Seeds Section -->
+        <section id="seeds-section" class="section-content d-none">
+            <h2 class="section-title"><i class="bi bi-key"></i> FBI Seeds</h2>
+            <div class="alert alert-info">
+                <i class="bi bi-info-circle"></i>
+                Seeds are required for some CIA files to run. FBI can import seeds from <code>sd:/fbi/seed/&lt;titleid&gt;.dat</code>
+            </div>
+            
+            <!-- Seed Stats -->
+            <div class="row g-3 mb-4">
+                <div class="col-md-3">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h3 id="totalSeeds">0</h3>
+                            <p class="text-muted mb-0">Available Seeds</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="card text-center">
+                        <div class="card-body">
+                            <h3 id="seedDownloads">0</h3>
+                            <p class="text-muted mb-0">Downloads</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6 text-end">
+                    <button class="btn btn-primary me-2" onclick="refreshSeeds()">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Seeds
+                    </button>
+                    <button class="btn btn-outline-primary" data-bs-toggle="modal" data-bs-target="#uploadSeeddbModal">
+                        <i class="bi bi-upload"></i> Upload seeddb.bin
+                    </button>
+                </div>
+            </div>
+
+            <!-- Search -->
+            <div class="row mb-4">
+                <div class="col-md-6">
+                    <div class="input-group">
+                        <span class="input-group-text"><i class="bi bi-search"></i></span>
+                        <input type="text" class="form-control" id="seedSearch" placeholder="Search by Title ID...">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Seeds Table -->
+            <div class="card">
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-hover mb-0">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Title ID</th>
+                                    <th>Downloads</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="seedsTableBody">
+                                <!-- Seeds populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pagination -->
+            <nav class="mt-3">
+                <ul class="pagination justify-content-center" id="seedsPagination"></ul>
+            </nav>
+        </section>
+
         <!-- Upload Section -->
         <section id="upload-section" class="section-content d-none">
             <h2 class="section-title"><i class="bi bi-cloud-upload"></i> Upload Files</h2>
@@ -459,18 +536,29 @@
                                 <button class="btn btn-outline-primary" id="modalQrBtn">
                                     <i class="bi bi-qr-code"></i> Show QR Code
                                 </button>
+                                <button class="btn btn-outline-success d-none" id="modalSeedBtn">
+                                    <i class="bi bi-key"></i> Get Seed
+                                </button>
                             </div>
                         </div>
                         <div class="col-md-8">
                             <dl class="row">
                                 <dt class="col-sm-4">Title ID</dt>
                                 <dd class="col-sm-8" id="modalTitleId"></dd>
+                                <dt class="col-sm-4">Product Code</dt>
+                                <dd class="col-sm-8" id="modalProductCode"></dd>
                                 <dt class="col-sm-4">Category</dt>
                                 <dd class="col-sm-8" id="modalCategory"></dd>
                                 <dt class="col-sm-4">Region</dt>
                                 <dd class="col-sm-8" id="modalRegion"></dd>
                                 <dt class="col-sm-4">Size</dt>
                                 <dd class="col-sm-8" id="modalSize"></dd>
+                                <dt class="col-sm-4">Downloads</dt>
+                                <dd class="col-sm-8" id="modalDownloads"></dd>
+                                <dt class="col-sm-4">Uploaded By</dt>
+                                <dd class="col-sm-8" id="modalUploadedBy"></dd>
+                                <dt class="col-sm-4">SHA256</dt>
+                                <dd class="col-sm-8"><code id="modalSha256" style="word-break: break-all; font-size: 0.75rem;"></code></dd>
                             </dl>
                             <h6>Description</h6>
                             <p id="modalDescription"></p>
@@ -497,6 +585,65 @@
     <div id="loadingSpinner" class="loading-overlay d-none">
         <div class="spinner-border text-primary" role="status">
             <span class="visually-hidden">Loading...</span>
+        </div>
+    </div>
+
+    <!-- Upload seeddb.bin Modal -->
+    <div class="modal fade" id="uploadSeeddbModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-upload"></i> Upload seeddb.bin</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="uploadSeeddbForm">
+                        <div class="mb-3">
+                            <label class="form-label">seeddb.bin file</label>
+                            <input type="file" class="form-control" id="seeddbFile" accept=".bin" required>
+                            <div class="form-text">Upload a seeddb.bin file to extract seeds</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Uploaded By</label>
+                            <input type="text" class="form-control" id="seeddbUploadedBy" placeholder="Your name">
+                        </div>
+                        <div class="d-grid">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-upload"></i> Upload & Extract Seeds
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Seed QR Modal -->
+    <div class="modal fade" id="seedQrModal" tabindex="-1">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-qr-code"></i> Seed QR Code</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <div id="seedQrCodeContainer" class="mb-3"></div>
+                    <h5 id="seedQrTitleId" class="mb-2"></h5>
+                    <p class="text-muted small">FBI Path: <code id="seedFbiPath"></code></p>
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle"></i>
+                        Scan with FBI: <strong>Remote Install</strong> → <strong>Scan QR Code</strong>
+                    </div>
+                    <div class="d-grid gap-2">
+                        <button class="btn btn-outline-primary" onclick="downloadSeedDirect()">
+                            <i class="bi bi-download"></i> Download .dat File
+                        </button>
+                        <button class="btn btn-outline-secondary" onclick="copySeedLink()">
+                            <i class="bi bi-link-45deg"></i> Copy Link
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 

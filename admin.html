@@ -884,7 +884,7 @@
                             ${file.sha256 ? file.sha256.substring(0, 16) + '...' : 'N/A'}
                         </code>
                     </td>
-                    <td>${formatFileSize(file.size)}</td>
+                    <td>${formatSizeWithBlocks(file.size)}</td>
                     <td>${new Date(file.uploadDate).toLocaleDateString()}</td>
                     <td>
                         <button class="btn btn-sm btn-outline-primary me-1" onclick="editFile('${file.id}')">
@@ -934,7 +934,7 @@
             document.getElementById('editFileUploadedBy').value = file.uploadedBy || '';
             document.getElementById('editFileIcon').value = file.icon || '';
             document.getElementById('editFilePath').textContent = file.filePath;
-            document.getElementById('editFileSize').textContent = formatFileSize(file.size);
+            document.getElementById('editFileSize').textContent = formatSizeWithBlocks(file.size);
             document.getElementById('editFileDownloads').textContent = file.downloadCount || 0;
             document.getElementById('editFileSha256').textContent = file.sha256 || 'N/A';
             
@@ -1124,6 +1124,16 @@
             const sizes = ['Bytes', 'KB', 'MB', 'GB'];
             const i = Math.floor(Math.log(bytes) / Math.log(1024));
             return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
+        }
+
+        function bytesToBlocks(bytes) {
+            if (!bytes) return '0';
+            return Math.ceil(bytes / 131072).toLocaleString();
+        }
+
+        function formatSizeWithBlocks(bytes) {
+            if (!bytes) return 'Unknown';
+            return `${formatFileSize(bytes)} (${bytesToBlocks(bytes)} blocks)`;
         }
 
         function showToast(title, message) {

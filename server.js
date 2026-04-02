@@ -26,7 +26,8 @@ const DB_FILES = {
     files: path.join(DATA_DIR, 'db', 'files.json'),
     logs: path.join(DATA_DIR, 'db', 'logs.json'),
     users: path.join(DATA_DIR, 'db', 'users.json'),
-    stats: path.join(DATA_DIR, 'db', 'stats.json')
+    stats: path.join(DATA_DIR, 'db', 'stats.json'),
+    seeds: path.join(DATA_DIR, 'db', 'seeds.json')
 };
 
 // Ensure directories exist
@@ -35,7 +36,8 @@ const UPLOAD_DIRS = {
     dlc: path.join(DATA_DIR, 'dlc'),
     apps: path.join(DATA_DIR, 'apps'),
     'virtual-console': path.join(DATA_DIR, 'virtual-console'),
-    homebrew: path.join(DATA_DIR, 'homebrew')
+    homebrew: path.join(DATA_DIR, 'homebrew'),
+    seeds: path.join(DATA_DIR, 'seeds')
 };
 
 // Create directories
@@ -538,6 +540,308 @@ function getDailyStats(files, logs) {
     }
     
     return result;
+}
+
+// ============================================
+// Seed Management (hydroseed functionality)
+// ============================================
+
+const SEED_SOURCES = [
+    'https://github.com/ihaveamac/3DS-rom-tools/raw/master/seeddb/seeddb.bin'
+];
+
+// Parse seeddb.bin file
+function parseSeedDB(buffer) {
+    const seeds = [];
+    
+    if (buffer.length < 4) return seeds;
+    
+    const count = buffer.readUInt32LE(0);
+    
+    for (let i = 0; i < count; i++) {
+        const offset = 0x10 + (0x20 * i);
+        
+        if (offset + 0x20 > buffer.length) break;
+        
+        // Read title ID (8 bytes, big-endian)
+        const titleId = buffer.subarray(offset, offset + 8).toString('hex').toUpperCase();
+        
+        // Read seed value (16 bytes)
+        const seedValue = buffer.subarray(offset + 8, offset + 0x18);
+        
+        seeds.push({
+            titleId,
+            seedValue: seedValue.toString('hex')
+        });
+    }
+    
+    return seeds;
+}
+
+// Download seeddb.bin from URL
+async function downloadSeedDB(url) {
+    const https = require('https');
+    const http = require('http');
+    
+    return new Promise((resolve, reject) => {
+        const client = url.startsWith('https') ? https : http;
+        
+        client.get(url, (res) => {
+            if (res.statusCode === 301 || res.statusCode === 302) {
+                return downloadSeedDB(res.headers.location).then(resolve).catch(reject);
+            }
+            
+            const chunks = [];
+            res.on('data', chunk => chunks.push(chunk));
+            res.on('end', () => resolve(Buffer.concat(chunks)));
+            res.on('error', reject);
+        }).on('error', reject);
+    });
+}
+
+// Extract seed .dat file for a specific title
+function extractSeedDat(seeds, titleId) {
+    const seed = seeds.find(s => s.titleId.toLowerCase() === titleId.toLowerCase());
+    if (!seed) return null;
+    
+    return Buffer.from(seed.seedValue, 'hex');
+}
+
+// ============================================
+// Seed API Routes
+// ============================================
+
+// Get all seeds
+app.get('/api/seeds', async (req, res) => {
+    try {
+        let seeds = readDB(DB_FILES.seeds);
+        
+        // If no seeds, try to fetch from sources
+        if (seeds.length === 0) {
+            seeds = await fetchAndCacheSeeds();
+        }
+        
+        const { search, page = 1, limit = 100 } = req.query;
+        
+        let filtered = seeds;
+        
+        if (search) {
+            const searchLower = search.toLowerCase();
+            filtered = filtered.filter(s => s.titleId.toLowerCase().includes(searchLower));
+        }
+        
+        const startIndex = (page - 1) * limit;
+        const endIndex = startIndex + parseInt(limit);
+        const paginated = filtered.slice(startIndex, endIndex);
+        
+        res.json({
+            success: true,
+            data: paginated,
+            pagination: {
+                total: filtered.length,
+                page: parseInt(page),
+                limit: parseInt(limit),
+                pages: Math.ceil(filtered.length / limit)
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Get seed for specific title ID
+app.get('/api/seeds/:titleId', async (req, res) => {
+    try {
+        let seeds = readDB(DB_FILES.seeds);
+        
+        if (seeds.length === 0) {
+            seeds = await fetchAndCacheSeeds();
+        }
+        
+        const titleId = req.params.titleId.toUpperCase();
+        const seed = seeds.find(s => s.titleId === titleId);
+        
+        if (!seed) {
+            return res.status(404).json({ success: false, error: 'Seed not found for this title' });
+        }
+        
+        res.json({ success: true, data: seed });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Download seed .dat file for FBI
+app.get('/api/seeds/:titleId/download', async (req, res) => {
+    try {
+        let seeds = readDB(DB_FILES.seeds);
+        
+        if (seeds.length === 0) {
+            seeds = await fetchAndCacheSeeds();
+        }
+        
+        const titleId = req.params.titleId.toUpperCase();
+        const seed = seeds.find(s => s.titleId === titleId);
+        
+        if (!seed) {
+            return res.status(404).json({ success: false, error: 'Seed not found for this title' });
+        }
+        
+        // Increment download count
+        seed.downloadCount = (seed.downloadCount || 0) + 1;
+        writeDB(DB_FILES.seeds, seeds);
+        
+        addLog('SEED_DOWNLOAD', {
+            titleId,
+            downloadCount: seed.downloadCount,
+            ip: req.ip
+        });
+        
+        // Send as .dat file
+        const seedBuffer = Buffer.from(seed.seedValue, 'hex');
+        res.set({
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': `attachment; filename="${titleId}.dat"`,
+            'Content-Length': seedBuffer.length
+        });
+        res.send(seedBuffer);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Refresh seeds from sources
+app.post('/api/seeds/refresh', async (req, res) => {
+    try {
+        const seeds = await fetchAndCacheSeeds();
+        
+        addLog('SEEDS_REFRESHED', {
+            count: seeds.length,
+            ip: req.ip
+        }, req.body.adminUser || 'admin');
+        
+        res.json({ success: true, count: seeds.length });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Upload custom seeddb.bin
+app.post('/api/seeds/upload', upload.single('seeddb'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, error: 'No file uploaded' });
+        }
+        
+        const buffer = fs.readFileSync(req.file.path);
+        const newSeeds = parseSeedDB(buffer);
+        
+        if (newSeeds.length === 0) {
+            fs.unlinkSync(req.file.path);
+            return res.status(400).json({ success: false, error: 'Invalid seeddb.bin file' });
+        }
+        
+        // Merge with existing seeds
+        let existingSeeds = readDB(DB_FILES.seeds);
+        const existingIds = new Set(existingSeeds.map(s => s.titleId));
+        
+        let added = 0;
+        for (const seed of newSeeds) {
+            if (!existingIds.has(seed.titleId)) {
+                existingSeeds.push(seed);
+                added++;
+            }
+        }
+        
+        writeDB(DB_FILES.seeds, existingSeeds);
+        fs.unlinkSync(req.file.path);
+        
+        addLog('SEEDS_UPLOADED', {
+            newSeeds: newSeeds.length,
+            added,
+            total: existingSeeds.length,
+            ip: req.ip
+        }, req.body.uploadedBy || 'Anonymous');
+        
+        res.json({
+            success: true,
+            message: `Added ${added} new seeds (${existingSeeds.length} total)`
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Get seed statistics
+app.get('/api/seeds/stats', (req, res) => {
+    const seeds = readDB(DB_FILES.seeds);
+    const totalDownloads = seeds.reduce((sum, s) => sum + (s.downloadCount || 0), 0);
+    
+    // Most downloaded seeds
+    const topSeeds = [...seeds]
+        .filter(s => s.downloadCount > 0)
+        .sort((a, b) => (b.downloadCount || 0) - (a.downloadCount || 0))
+        .slice(0, 10);
+    
+    res.json({
+        success: true,
+        data: {
+            totalSeeds: seeds.length,
+            totalDownloads,
+            topSeeds
+        }
+    });
+});
+
+// Generate FBI seed QR code
+app.get('/api/seeds/:titleId/qr', async (req, res) => {
+    try {
+        const titleId = req.params.titleId.toUpperCase();
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const downloadUrl = `${baseUrl}/api/seeds/${titleId}/download`;
+        
+        res.json({
+            success: true,
+            data: {
+                titleId,
+                downloadUrl,
+                fbiPath: `sd:/fbi/seed/${titleId}.dat`
+            }
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Fetch and cache seeds from sources
+async function fetchAndCacheSeeds() {
+    let allSeeds = [];
+    
+    for (const url of SEED_SOURCES) {
+        try {
+            console.log(`Fetching seeds from: ${url}`);
+            const buffer = await downloadSeedDB(url);
+            const seeds = parseSeedDB(buffer);
+            console.log(`Found ${seeds.length} seeds`);
+            allSeeds = allSeeds.concat(seeds);
+        } catch (error) {
+            console.error(`Failed to fetch from ${url}:`, error.message);
+        }
+    }
+    
+    // Remove duplicates
+    const uniqueSeeds = [];
+    const seen = new Set();
+    
+    for (const seed of allSeeds) {
+        if (!seen.has(seed.titleId)) {
+            seen.add(seed.titleId);
+            uniqueSeeds.push(seed);
+        }
+    }
+    
+    writeDB(DB_FILES.seeds, uniqueSeeds);
+    return uniqueSeeds;
 }
 
 // ============================================

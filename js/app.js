@@ -605,6 +605,8 @@ function showSection(sectionName) {
         renderVirtualConsole();
     } else if (sectionName === 'homebrew') {
         renderHomebrew();
+    } else if (sectionName === 'seeds') {
+        loadSeeds();
     } else if (sectionName === 'home') {
         renderFeaturedGames();
         renderRecentHomebrew();
@@ -792,8 +794,9 @@ function renderUploadedFiles() {
         container.innerHTML = AppState.uploadedFiles.map(file => `
             <tr>
                 <td>
-                    <img src="${file.icon || 'data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect fill=%22%23667eea%22 width=%22100%22 height=%22100%22/><text x=%2250%22 y=%2255%22 text-anchor=%22middle%22 fill=%22white%22 font-size=%2240%22>' + file.name.charAt(0) + '</text></svg>'}" 
-                         alt="${file.name}" width="40" height="40" class="rounded">
+                    <img src="${file.icon || getIconUrl(file) || getPlaceholderIcon(file.name, '#667eea')}" 
+                         alt="${file.name}" width="40" height="40" class="rounded"
+                         onerror="this.src='${getPlaceholderIcon(file.name, '#667eea')}'">
                 </td>
                 <td><strong>${file.name}</strong></td>
                 <td><span class="badge badge-${file.category}">${file.category}</span></td>
@@ -804,7 +807,7 @@ function renderUploadedFiles() {
                         ${file.sha256 ? file.sha256.substring(0, 12) + '...' : 'N/A'}
                     </code>
                 </td>
-                <td class="file-size">${formatFileSize(file.size)}</td>
+                <td class="file-size">${formatSizeWithBlocks(file.size)}</td>
                 <td>
                     <div class="btn-group btn-group-sm">
                         <button class="btn btn-outline-primary" onclick="showQrCode('${file.id}')" title="Show QR Code">
@@ -828,25 +831,53 @@ function renderUploadedFiles() {
 // ============================================
 // Card Creation
 // ============================================
+
+// Get 3DS icon URL from GitHub repository
+const ICON_BASE_URL = 'https://raw.githubusercontent.com/wildfirebill-nintendo-3ds/3dsgamesicons/d73aa93996362bf6cdc33c985a23ab7133fe6328/icons/title_ids';
+
+function getIconUrl(title) {
+    // If title already has a custom icon, use it
+    if (title.icon && title.icon.startsWith('http')) {
+        return title.icon;
+    }
+    if (title.icon && title.icon.startsWith('data:')) {
+        return title.icon;
+    }
+    
+    // Try to get from GitHub icon repository using title ID
+    if (title.titleId && title.titleId.length === 16) {
+        const titleIdLower = title.titleId.toLowerCase();
+        return `${ICON_BASE_URL}/${titleIdLower}.png`;
+    }
+    
+    return null;
+}
+
+// Generate placeholder icon SVG
+function getPlaceholderIcon(name, color) {
+    const letter = name ? name.charAt(0).toUpperCase() : '?';
+    return `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="${encodeURIComponent(color)}" width="100" height="100" rx="10"/><text x="50" y="55" text-anchor="middle" fill="white" font-size="40" font-family="Arial">${letter}</text></svg>`;
+}
+
 function createTitleCard(title, category) {
     const regionBadge = getRegionBadge(title.region);
     const categoryBadge = getCategoryBadge(category);
     const iconColors = [
-        'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-        'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-        'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-        'linear-gradient(135deg, #fa709a 0%, #fee140 100%)',
-        'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'
+        '#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a', '#a8edea', '#ff6b6b', '#4ecdc4'
     ];
     const iconColor = iconColors[Math.abs(hashCode(title.name)) % iconColors.length];
+    const iconUrl = getIconUrl(title);
+    const placeholderIcon = getPlaceholderIcon(title.name, iconColor);
 
     return `
         <div class="col">
             <div class="title-card position-relative" onclick="showTitleDetails('${title.titleId}', '${category}')">
                 <div class="card-img-top icon-placeholder" style="background: ${iconColor}">
-                    ${title.icon ? `<img src="${title.icon}" alt="${title.name}" class="w-100 h-100" style="object-fit: cover;">` : 
-                    `<span>${title.name.charAt(0).toUpperCase()}</span>`}
+                    <img src="${iconUrl || placeholderIcon}" 
+                         alt="${title.name}" 
+                         class="w-100 h-100" 
+                         style="object-fit: cover;"
+                         onerror="this.src='${placeholderIcon}'">
                     ${regionBadge}
                     <span class="qr-badge"><i class="bi bi-qr-code"></i> QR</span>
                 </div>
@@ -1020,18 +1051,35 @@ function showTitleDetails(titleId, category) {
 
     document.getElementById('modalTitleName').textContent = title.name;
     document.getElementById('modalTitleId').textContent = title.titleId || 'N/A';
+    document.getElementById('modalProductCode').textContent = title.productCode || 'N/A';
     document.getElementById('modalCategory').textContent = category.charAt(0).toUpperCase() + category.slice(1);
     document.getElementById('modalRegion').textContent = (title.region || 'global').replace('region-', '').toUpperCase();
-    document.getElementById('modalSize').textContent = typeof title.size === 'number' ? formatFileSize(title.size) : (title.size || 'Unknown');
+    document.getElementById('modalSize').textContent = typeof title.size === 'number' ? formatSizeWithBlocks(title.size) : (title.size || 'Unknown');
     document.getElementById('modalDescription').textContent = title.description || 'No description available.';
+    document.getElementById('modalDownloads').textContent = title.downloadCount || 0;
+    document.getElementById('modalUploadedBy').textContent = title.uploadedBy || 'N/A';
+    document.getElementById('modalSha256').textContent = title.sha256 || 'N/A';
     
     const iconImg = document.getElementById('modalTitleIcon');
-    iconImg.src = title.icon || `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect fill="%23667eea" width="100" height="100"/><text x="50" y="55" text-anchor="middle" fill="white" font-size="40">${title.name.charAt(0)}</text></svg>`;
+    const iconColors = ['#667eea', '#f093fb', '#4facfe', '#43e97b', '#fa709a'];
+    const iconColor = iconColors[Math.abs(hashCode(title.name)) % iconColors.length];
+    iconImg.src = getIconUrl(title) || getPlaceholderIcon(title.name, iconColor);
+    iconImg.onerror = function() { this.src = getPlaceholderIcon(title.name, iconColor); };
+
+    // Show/hide seed button based on whether seed exists
+    const seedBtn = document.getElementById('modalSeedBtn');
+    seedBtn.classList.remove('d-none');
+    seedBtn.onclick = () => {
+        bootstrap.Modal.getInstance(document.getElementById('titleModal'))?.hide();
+        setTimeout(() => showSeedQr(titleId), 300);
+    };
 
     // Set up buttons
     document.getElementById('modalDownloadBtn').onclick = () => {
         if (title.fileUrl) {
             window.open(title.fileUrl, '_blank');
+        } else if (title.titleId) {
+            window.open(`/api/download/${title.id || title.titleId}`, '_blank');
         } else {
             showToast('Info', 'Download link not available');
         }
@@ -1438,6 +1486,182 @@ function loadGuideContent(guideId) {
 }
 
 // ============================================
+// Seeds Management
+// ============================================
+let currentSeedTitleId = null;
+let seedsPage = 1;
+
+async function loadSeeds(page = 1) {
+    const search = document.getElementById('seedSearch')?.value || '';
+    
+    try {
+        const response = await fetch(`/api/seeds?page=${page}&limit=50&search=${search}`);
+        const result = await response.json();
+        
+        if (result.success) {
+            seedsPage = page;
+            renderSeedsTable(result.data);
+            renderSeedsPagination(result.pagination);
+            loadSeedStats();
+        }
+    } catch (error) {
+        console.error('Error loading seeds:', error);
+    }
+}
+
+async function loadSeedStats() {
+    try {
+        const response = await fetch('/api/seeds/stats');
+        const result = await response.json();
+        
+        if (result.success) {
+            document.getElementById('totalSeeds').textContent = result.data.totalSeeds;
+            document.getElementById('seedDownloads').textContent = result.data.totalDownloads;
+        }
+    } catch (error) {
+        console.error('Error loading seed stats:', error);
+    }
+}
+
+function renderSeedsTable(seeds) {
+    const tbody = document.getElementById('seedsTableBody');
+    if (!tbody) return;
+    
+    tbody.innerHTML = seeds.map(seed => `
+        <tr>
+            <td><code>${seed.titleId}</code></td>
+            <td><span class="badge bg-success">${seed.downloadCount || 0}</span></td>
+            <td>
+                <button class="btn btn-sm btn-outline-primary me-1" onclick="showSeedQr('${seed.titleId}')" title="Show QR">
+                    <i class="bi bi-qr-code"></i>
+                </button>
+                <a href="/api/seeds/${seed.titleId}/download" class="btn btn-sm btn-outline-success" title="Download">
+                    <i class="bi bi-download"></i>
+                </a>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function renderSeedsPagination(pagination) {
+    const container = document.getElementById('seedsPagination');
+    if (!container || !pagination || pagination.pages <= 1) {
+        if (container) container.innerHTML = '';
+        return;
+    }
+    
+    let html = '';
+    for (let i = 1; i <= pagination.pages; i++) {
+        html += `
+            <li class="page-item ${i === pagination.page ? 'active' : ''}">
+                <a class="page-link" href="#" onclick="loadSeeds(${i}); return false;">${i}</a>
+            </li>
+        `;
+    }
+    container.innerHTML = html;
+}
+
+async function showSeedQr(titleId) {
+    currentSeedTitleId = titleId;
+    
+    const modal = new bootstrap.Modal(document.getElementById('seedQrModal'));
+    const container = document.getElementById('seedQrCodeContainer');
+    
+    // Clear previous QR
+    container.innerHTML = '';
+    
+    // Generate QR code for FBI remote install
+    const downloadUrl = `${window.location.origin}/api/seeds/${titleId}/download`;
+    
+    QRCode.toCanvas(downloadUrl, {
+        width: 256,
+        margin: 2,
+        color: { dark: '#000000', light: '#ffffff' }
+    }, (error, canvas) => {
+        if (!error) container.appendChild(canvas);
+    });
+    
+    document.getElementById('seedQrTitleId').textContent = titleId;
+    document.getElementById('seedFbiPath').textContent = `sd:/fbi/seed/${titleId}.dat`;
+    
+    modal.show();
+}
+
+function downloadSeedDirect() {
+    if (currentSeedTitleId) {
+        window.open(`/api/seeds/${currentSeedTitleId}/download`, '_blank');
+    }
+}
+
+function copySeedLink() {
+    if (currentSeedTitleId) {
+        const url = `${window.location.origin}/api/seeds/${currentSeedTitleId}/download`;
+        navigator.clipboard.writeText(url).then(() => {
+            showToast('Copied!', 'Download link copied to clipboard');
+        });
+    }
+}
+
+async function refreshSeeds() {
+    showLoading(true);
+    
+    try {
+        const response = await fetch('/api/seeds/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            showToast('Success', `Loaded ${result.count} seeds`);
+            loadSeeds();
+        } else {
+            showToast('Error', result.error);
+        }
+    } catch (error) {
+        showToast('Error', 'Failed to refresh seeds');
+    } finally {
+        showLoading(false);
+    }
+}
+
+// Upload seeddb.bin form
+document.getElementById('uploadSeeddbForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    showLoading(true);
+    
+    const formData = new FormData();
+    formData.append('seeddb', document.getElementById('seeddbFile').files[0]);
+    formData.append('uploadedBy', document.getElementById('seeddbUploadedBy').value || 'Anonymous');
+    
+    try {
+        const response = await fetch('/api/seeds/upload', {
+            method: 'POST',
+            body: formData
+        });
+        const result = await response.json();
+        
+        if (result.success) {
+            bootstrap.Modal.getInstance(document.getElementById('uploadSeeddbModal')).hide();
+            showToast('Success', result.message);
+            loadSeeds();
+        } else {
+            showToast('Error', result.error);
+        }
+    } catch (error) {
+        showToast('Error', 'Failed to upload seeddb.bin');
+    } finally {
+        showLoading(false);
+    }
+});
+
+// Seed search
+document.getElementById('seedSearch')?.addEventListener('input', () => {
+    clearTimeout(window.seedSearchTimeout);
+    window.seedSearchTimeout = setTimeout(() => loadSeeds(), 300);
+});
+
+// ============================================
 // Utility Functions
 // ============================================
 function formatFileSize(bytes) {
@@ -1445,6 +1669,17 @@ function formatFileSize(bytes) {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(1024));
     return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${sizes[i]}`;
+}
+
+function bytesToBlocks(bytes) {
+    if (!bytes) return '0';
+    // 1 block = 128KB = 131072 bytes on 3DS
+    return Math.ceil(bytes / 131072).toLocaleString();
+}
+
+function formatSizeWithBlocks(bytes) {
+    if (!bytes) return 'Unknown';
+    return `${formatFileSize(bytes)} (${bytesToBlocks(bytes)} blocks)`;
 }
 
 function showLoading(show) {
