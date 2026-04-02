@@ -6,6 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const morgan = require('morgan');
+const { initDatabase, migrateFromJSON, filesDB, logsDB, statsDB, seedsDB } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -19,16 +20,9 @@ app.use(express.static(path.join(__dirname)));
 app.use(morgan('combined'));
 
 // ============================================
-// Data Storage (JSON files - replace with DB in production)
+// Data Storage
 // ============================================
 const DATA_DIR = path.join(__dirname, 'data');
-const DB_FILES = {
-    files: path.join(DATA_DIR, 'db', 'files.json'),
-    logs: path.join(DATA_DIR, 'db', 'logs.json'),
-    users: path.join(DATA_DIR, 'db', 'users.json'),
-    stats: path.join(DATA_DIR, 'db', 'stats.json'),
-    seeds: path.join(DATA_DIR, 'db', 'seeds.json')
-};
 
 // Ensure directories exist
 const UPLOAD_DIRS = {
@@ -40,62 +34,16 @@ const UPLOAD_DIRS = {
     seeds: path.join(DATA_DIR, 'seeds')
 };
 
-// Create directories
 Object.values(UPLOAD_DIRS).forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
-
-const dbDir = path.join(DATA_DIR, 'db');
-if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-
-// ============================================
-// Database Functions
-// ============================================
-function readDB(file) {
-    try {
-        if (!fs.existsSync(file)) {
-            fs.writeFileSync(file, JSON.stringify([], null, 2));
-            return [];
-        }
-        const data = fs.readFileSync(file, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        console.error(`Error reading ${file}:`, error);
-        return [];
-    }
-}
-
-function writeDB(file, data) {
-    try {
-        fs.writeFileSync(file, JSON.stringify(data, null, 2));
-        return true;
-    } catch (error) {
-        console.error(`Error writing ${file}:`, error);
-        return false;
-    }
-}
 
 // ============================================
 // Logging System
 // ============================================
 function addLog(action, details, user = 'system') {
-    const logs = readDB(DB_FILES.logs);
-    const logEntry = {
-        id: uuidv4(),
-        timestamp: new Date().toISOString(),
-        action,
-        details,
-        user,
-        ip: details.ip || 'unknown'
-    };
-    logs.unshift(logEntry);
-    
-    // Keep only last 1000 logs
-    if (logs.length > 1000) logs.length = 1000;
-    
-    writeDB(DB_FILES.logs, logs);
-    console.log(`[${logEntry.timestamp}] ${action}: ${JSON.stringify(details)}`);
-    return logEntry;
+    const ip = details.ip || 'unknown';
+    return logsDB.add(action, details, user, ip);
 }
 
 // ============================================
@@ -106,12 +54,10 @@ const storage = multer.diskStorage({
         const category = req.body.category || 'homebrew';
         let uploadPath = UPLOAD_DIRS[category] || UPLOAD_DIRS.homebrew;
         
-        // Add subfolder for homebrew
         if (category === 'homebrew' && req.body.homebrewCategory) {
             uploadPath = path.join(uploadPath, req.body.homebrewCategory);
         }
         
-        // Add subfolder for virtual console
         if (category === 'virtual-console' && req.body.vcSystem) {
             uploadPath = path.join(uploadPath, req.body.vcSystem);
         }
@@ -140,48 +86,25 @@ const upload = multer({
 });
 
 // ============================================
-// API Routes
+// API Routes - Files
 // ============================================
 
 // Get all files
 app.get('/api/files', (req, res) => {
-    const files = readDB(DB_FILES.files);
     const { category, search, page = 1, limit = 50 } = req.query;
     
-    let filtered = files;
-    
-    if (category && category !== 'all') {
-        filtered = filtered.filter(f => f.category === category);
-    }
-    
-    if (search) {
-        const searchLower = search.toLowerCase();
-        filtered = filtered.filter(f => 
-            f.name.toLowerCase().includes(searchLower) ||
-            f.titleId?.toLowerCase().includes(searchLower)
-        );
-    }
-    
-    const startIndex = (page - 1) * limit;
-    const endIndex = startIndex + parseInt(limit);
-    const paginated = filtered.slice(startIndex, endIndex);
+    const result = filesDB.getAll({ category, search, page, limit });
     
     res.json({
         success: true,
-        data: paginated,
-        pagination: {
-            total: filtered.length,
-            page: parseInt(page),
-            limit: parseInt(limit),
-            pages: Math.ceil(filtered.length / limit)
-        }
+        data: result.data,
+        pagination: result.pagination
     });
 });
 
 // Get single file
 app.get('/api/files/:id', (req, res) => {
-    const files = readDB(DB_FILES.files);
-    const file = files.find(f => f.id === req.params.id);
+    const file = filesDB.getById(req.params.id);
     
     if (!file) {
         return res.status(404).json({ success: false, error: 'File not found' });
@@ -197,13 +120,8 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
             return res.status(400).json({ success: false, error: 'No file uploaded' });
         }
         
-        const files = readDB(DB_FILES.files);
         const category = req.body.category || 'homebrew';
-        
-        // Build relative path
-        let relativePath = path.relative(__dirname, req.file.path).replace(/\\/g, '/');
-        
-        // Calculate SHA256 hash
+        const relativePath = path.relative(__dirname, req.file.path).replace(/\\/g, '/');
         const sha256 = await calculateFileHash(req.file.path);
         
         const newFile = {
@@ -228,10 +146,8 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
             icon: req.body.icon || null
         };
         
-        files.push(newFile);
-        writeDB(DB_FILES.files, files);
+        filesDB.create(newFile);
         
-        // Log the upload
         addLog('FILE_UPLOAD', {
             fileId: newFile.id,
             fileName: newFile.name,
@@ -242,8 +158,7 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
             ip: req.ip
         }, newFile.uploadedBy);
         
-        // Update stats
-        updateStats('upload', category);
+        statsDB.update('upload', category);
         
         res.json({ success: true, data: newFile });
     } catch (error) {
@@ -252,53 +167,33 @@ app.post('/api/files/upload', upload.single('file'), async (req, res) => {
     }
 });
 
-// Update file metadata (admin only - for now no auth check)
+// Update file metadata
 app.put('/api/files/:id', (req, res) => {
-    const files = readDB(DB_FILES.files);
-    const index = files.findIndex(f => f.id === req.params.id);
+    const file = filesDB.getById(req.params.id);
     
-    if (index === -1) {
+    if (!file) {
         return res.status(404).json({ success: false, error: 'File not found' });
     }
     
-    const allowedFields = ['name', 'titleId', 'productCode', 'description', 'region', 'category', 
-                          'homebrewCategory', 'vcSystem', 'uploadedBy', 'icon'];
-    
-    const updates = {};
-    allowedFields.forEach(field => {
-        if (req.body[field] !== undefined) {
-            updates[field] = req.body[field];
-        }
-    });
-    
-    files[index] = {
-        ...files[index],
-        ...updates,
-        lastModified: new Date().toISOString()
-    };
-    
-    writeDB(DB_FILES.files, files);
+    const updated = filesDB.update(req.params.id, req.body);
     
     addLog('FILE_UPDATE', {
-        fileId: files[index].id,
-        fileName: files[index].name,
-        updates,
+        fileId: file.id,
+        fileName: file.name,
+        updates: req.body,
         ip: req.ip
     }, req.body.adminUser || 'admin');
     
-    res.json({ success: true, data: files[index] });
+    res.json({ success: true, data: updated });
 });
 
 // Delete file
 app.delete('/api/files/:id', (req, res) => {
-    const files = readDB(DB_FILES.files);
-    const index = files.findIndex(f => f.id === req.params.id);
+    const file = filesDB.getById(req.params.id);
     
-    if (index === -1) {
+    if (!file) {
         return res.status(404).json({ success: false, error: 'File not found' });
     }
-    
-    const file = files[index];
     
     // Delete physical file
     const filePath = path.join(__dirname, file.filePath);
@@ -306,8 +201,7 @@ app.delete('/api/files/:id', (req, res) => {
         fs.unlinkSync(filePath);
     }
     
-    files.splice(index, 1);
-    writeDB(DB_FILES.files, files);
+    filesDB.delete(req.params.id);
     
     addLog('FILE_DELETE', {
         fileId: file.id,
@@ -320,154 +214,78 @@ app.delete('/api/files/:id', (req, res) => {
 
 // Download file and track count
 app.get('/api/download/:id', (req, res) => {
-    const files = readDB(DB_FILES.files);
-    const index = files.findIndex(f => f.id === req.params.id);
+    const file = filesDB.getById(req.params.id);
     
-    if (index === -1) {
+    if (!file) {
         return res.status(404).json({ success: false, error: 'File not found' });
     }
     
-    const file = files[index];
     const filePath = path.join(__dirname, file.filePath);
     
     if (!fs.existsSync(filePath)) {
         return res.status(404).json({ success: false, error: 'Physical file not found' });
     }
     
-    // Increment download count
-    files[index].downloadCount = (files[index].downloadCount || 0) + 1;
-    files[index].lastDownload = new Date().toISOString();
-    writeDB(DB_FILES.files, files);
+    filesDB.incrementDownload(req.params.id);
     
     addLog('FILE_DOWNLOAD', {
         fileId: file.id,
         fileName: file.name,
-        downloadCount: files[index].downloadCount,
+        downloadCount: (file.downloadCount || 0) + 1,
         ip: req.ip
     });
     
-    // Update stats
-    updateStats('download', file.category);
+    statsDB.update('download', file.category);
     
     res.download(filePath, file.fileName);
 });
 
 // ============================================
-// Logs API
+// API Routes - Logs
 // ============================================
 app.get('/api/logs', (req, res) => {
-    const logs = readDB(DB_FILES.logs);
     const { action, user, page = 1, limit = 100 } = req.query;
     
-    let filtered = logs;
-    
-    if (action) {
-        filtered = filtered.filter(l => l.action === action);
-    }
-    
-    if (user) {
-        filtered = filtered.filter(l => l.user.toLowerCase().includes(user.toLowerCase()));
-    }
-    
-    const startIndex = (page - 1) * limit;
-    const endIndex = startIndex + parseInt(limit);
-    const paginated = filtered.slice(startIndex, endIndex);
+    const result = logsDB.getAll({ action, user, page, limit });
     
     res.json({
         success: true,
-        data: paginated,
-        pagination: {
-            total: filtered.length,
-            page: parseInt(page),
-            limit: parseInt(limit)
-        }
+        data: result.data,
+        pagination: result.pagination
     });
 });
 
 app.delete('/api/logs', (req, res) => {
-    writeDB(DB_FILES.logs, []);
+    logsDB.clear();
     addLog('LOGS_CLEARED', { ip: req.ip }, req.query.adminUser || 'admin');
     res.json({ success: true, message: 'Logs cleared' });
 });
 
 // ============================================
-// Statistics API
+// API Routes - Statistics
 // ============================================
 app.get('/api/stats', (req, res) => {
-    const files = readDB(DB_FILES.files);
-    const logs = readDB(DB_FILES.logs);
-    const stats = readDB(DB_FILES.stats);
-    
-    // Calculate stats
-    const totalFiles = files.length;
-    const totalDownloads = files.reduce((sum, f) => sum + (f.downloadCount || 0), 0);
-    
-    // Files by category
-    const byCategory = {};
-    files.forEach(f => {
-        byCategory[f.category] = (byCategory[f.category] || 0) + 1;
-    });
-    
-    // Top downloaded files
-    const topDownloaded = [...files]
-        .sort((a, b) => (b.downloadCount || 0) - (a.downloadCount || 0))
-        .slice(0, 10);
-    
-    // Recent uploads
-    const recentUploads = [...files]
-        .sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate))
-        .slice(0, 10);
-    
-    // Uploads by user
-    const byUser = {};
-    files.forEach(f => {
-        const user = f.uploadedBy || 'Anonymous';
-        byUser[user] = (byUser[user] || 0) + 1;
-    });
-    
-    // Recent activity
-    const recentLogs = logs.slice(0, 20);
-    
-    // Daily stats for chart (last 7 days)
-    const dailyStats = getDailyStats(files, logs);
+    const fileStats = filesDB.getStats();
+    const recentLogs = logsDB.getRecent(20);
+    const dailyStats = logsDB.getDailyStats(7);
     
     res.json({
         success: true,
         data: {
-            totalFiles,
-            totalDownloads,
-            byCategory,
-            topDownloaded,
-            recentUploads,
-            byUser,
+            totalFiles: fileStats.totalFiles,
+            totalDownloads: fileStats.totalDownloads,
+            byCategory: fileStats.byCategory,
+            topDownloaded: fileStats.topDownloaded,
+            recentUploads: fileStats.recentUploads,
+            byUser: fileStats.byUser,
             recentLogs,
             dailyStats
         }
     });
 });
 
-// Get upload chart data
 app.get('/api/stats/uploads', (req, res) => {
-    const files = readDB(DB_FILES.files);
-    
-    // Group by user
-    const byUser = {};
-    files.forEach(f => {
-        const user = f.uploadedBy || 'Anonymous';
-        if (!byUser[user]) {
-            byUser[user] = { uploads: 0, downloads: 0 };
-        }
-        byUser[user].uploads++;
-        byUser[user].downloads += f.downloadCount || 0;
-    });
-    
-    // Convert to array for chart
-    const chartData = Object.entries(byUser).map(([name, data]) => ({
-        name,
-        uploads: data.uploads,
-        downloads: data.downloads
-    })).sort((a, b) => b.uploads - a.uploads);
-    
+    const chartData = filesDB.getUploadsByUser();
     res.json({ success: true, data: chartData });
 });
 
@@ -489,68 +307,13 @@ function calculateFileHash(filePath) {
     });
 }
 
-function updateStats(action, category) {
-    const stats = readDB(DB_FILES.stats);
-    const today = new Date().toISOString().split('T')[0];
-    
-    let todayStats = stats.find(s => s.date === today);
-    if (!todayStats) {
-        todayStats = { date: today, uploads: 0, downloads: 0, byCategory: {} };
-        stats.push(todayStats);
-    }
-    
-    if (action === 'upload') {
-        todayStats.uploads++;
-        todayStats.byCategory[category] = (todayStats.byCategory[category] || 0) + 1;
-    } else if (action === 'download') {
-        todayStats.downloads++;
-    }
-    
-    // Keep only last 30 days
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const filtered = stats.filter(s => new Date(s.date) >= thirtyDaysAgo);
-    
-    writeDB(DB_FILES.stats, filtered);
-}
-
-function getDailyStats(files, logs) {
-    const days = 7;
-    const result = [];
-    
-    for (let i = days - 1; i >= 0; i--) {
-        const date = new Date();
-        date.setDate(date.getDate() - i);
-        const dateStr = date.toISOString().split('T')[0];
-        
-        const dayUploads = files.filter(f => 
-            f.uploadDate && f.uploadDate.startsWith(dateStr)
-        ).length;
-        
-        const dayDownloads = logs.filter(l => 
-            l.action === 'FILE_DOWNLOAD' && l.timestamp.startsWith(dateStr)
-        ).length;
-        
-        result.push({
-            date: dateStr,
-            label: date.toLocaleDateString('en-US', { weekday: 'short' }),
-            uploads: dayUploads,
-            downloads: dayDownloads
-        });
-    }
-    
-    return result;
-}
-
 // ============================================
-// Seed Management (hydroseed functionality)
+// Seed Management
 // ============================================
-
 const SEED_SOURCES = [
     'https://github.com/ihaveamac/3DS-rom-tools/raw/master/seeddb/seeddb.bin'
 ];
 
-// Parse seeddb.bin file
 function parseSeedDB(buffer) {
     const seeds = [];
     
@@ -563,10 +326,7 @@ function parseSeedDB(buffer) {
         
         if (offset + 0x20 > buffer.length) break;
         
-        // Read title ID (8 bytes, big-endian)
         const titleId = buffer.subarray(offset, offset + 8).toString('hex').toUpperCase();
-        
-        // Read seed value (16 bytes)
         const seedValue = buffer.subarray(offset + 8, offset + 0x18);
         
         seeds.push({
@@ -578,7 +338,6 @@ function parseSeedDB(buffer) {
     return seeds;
 }
 
-// Download seeddb.bin from URL
 async function downloadSeedDB(url) {
     const https = require('https');
     const http = require('http');
@@ -599,67 +358,67 @@ async function downloadSeedDB(url) {
     });
 }
 
-// Extract seed .dat file for a specific title
-function extractSeedDat(seeds, titleId) {
-    const seed = seeds.find(s => s.titleId.toLowerCase() === titleId.toLowerCase());
-    if (!seed) return null;
+async function fetchAndCacheSeeds() {
+    let allSeeds = [];
     
-    return Buffer.from(seed.seedValue, 'hex');
+    for (const url of SEED_SOURCES) {
+        try {
+            console.log(`Fetching seeds from: ${url}`);
+            const buffer = await downloadSeedDB(url);
+            const seeds = parseSeedDB(buffer);
+            console.log(`Found ${seeds.length} seeds`);
+            allSeeds = allSeeds.concat(seeds);
+        } catch (error) {
+            console.error(`Failed to fetch from ${url}:`, error.message);
+        }
+    }
+    
+    const added = seedsDB.bulkInsert(allSeeds);
+    console.log(`Added ${added} new seeds to database`);
+    
+    return seedsDB.getAll({ limit: 1 });
 }
 
 // ============================================
 // Seed API Routes
 // ============================================
-
-// Get all seeds
 app.get('/api/seeds', async (req, res) => {
     try {
-        let seeds = readDB(DB_FILES.seeds);
-        
-        // If no seeds, try to fetch from sources
-        if (seeds.length === 0) {
-            seeds = await fetchAndCacheSeeds();
-        }
-        
         const { search, page = 1, limit = 100 } = req.query;
         
-        let filtered = seeds;
+        let result = seedsDB.getAll({ search, page, limit });
         
-        if (search) {
-            const searchLower = search.toLowerCase();
-            filtered = filtered.filter(s => s.titleId.toLowerCase().includes(searchLower));
+        // If no seeds, try to fetch from sources
+        if (result.pagination.total === 0) {
+            await fetchAndCacheSeeds();
+            result = seedsDB.getAll({ search, page, limit });
         }
-        
-        const startIndex = (page - 1) * limit;
-        const endIndex = startIndex + parseInt(limit);
-        const paginated = filtered.slice(startIndex, endIndex);
         
         res.json({
             success: true,
-            data: paginated,
-            pagination: {
-                total: filtered.length,
-                page: parseInt(page),
-                limit: parseInt(limit),
-                pages: Math.ceil(filtered.length / limit)
-            }
+            data: result.data,
+            pagination: result.pagination
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Get seed for specific title ID
+// Seed stats must be before :titleId routes
+app.get('/api/seeds/stats', (req, res) => {
+    const stats = seedsDB.getStats();
+    res.json({ success: true, data: stats });
+});
+
 app.get('/api/seeds/:titleId', async (req, res) => {
     try {
-        let seeds = readDB(DB_FILES.seeds);
+        let seed = seedsDB.getByTitleId(req.params.titleId);
         
-        if (seeds.length === 0) {
-            seeds = await fetchAndCacheSeeds();
+        if (!seed) {
+            // Try to fetch from sources
+            await fetchAndCacheSeeds();
+            seed = seedsDB.getByTitleId(req.params.titleId);
         }
-        
-        const titleId = req.params.titleId.toUpperCase();
-        const seed = seeds.find(s => s.titleId === titleId);
         
         if (!seed) {
             return res.status(404).json({ success: false, error: 'Seed not found for this title' });
@@ -671,37 +430,31 @@ app.get('/api/seeds/:titleId', async (req, res) => {
     }
 });
 
-// Download seed .dat file for FBI
 app.get('/api/seeds/:titleId/download', async (req, res) => {
     try {
-        let seeds = readDB(DB_FILES.seeds);
+        let seed = seedsDB.getByTitleId(req.params.titleId);
         
-        if (seeds.length === 0) {
-            seeds = await fetchAndCacheSeeds();
+        if (!seed) {
+            await fetchAndCacheSeeds();
+            seed = seedsDB.getByTitleId(req.params.titleId);
         }
-        
-        const titleId = req.params.titleId.toUpperCase();
-        const seed = seeds.find(s => s.titleId === titleId);
         
         if (!seed) {
             return res.status(404).json({ success: false, error: 'Seed not found for this title' });
         }
         
-        // Increment download count
-        seed.downloadCount = (seed.downloadCount || 0) + 1;
-        writeDB(DB_FILES.seeds, seeds);
+        seedsDB.incrementDownload(seed.titleId);
         
         addLog('SEED_DOWNLOAD', {
-            titleId,
-            downloadCount: seed.downloadCount,
+            titleId: seed.titleId,
+            downloadCount: (seed.downloadCount || 0) + 1,
             ip: req.ip
         });
         
-        // Send as .dat file
         const seedBuffer = Buffer.from(seed.seedValue, 'hex');
         res.set({
             'Content-Type': 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${titleId}.dat"`,
+            'Content-Disposition': `attachment; filename="${seed.titleId}.dat"`,
             'Content-Length': seedBuffer.length
         });
         res.send(seedBuffer);
@@ -710,23 +463,22 @@ app.get('/api/seeds/:titleId/download', async (req, res) => {
     }
 });
 
-// Refresh seeds from sources
 app.post('/api/seeds/refresh', async (req, res) => {
     try {
-        const seeds = await fetchAndCacheSeeds();
+        await fetchAndCacheSeeds();
+        const stats = seedsDB.getStats();
         
         addLog('SEEDS_REFRESHED', {
-            count: seeds.length,
+            count: stats.totalSeeds,
             ip: req.ip
         }, req.body.adminUser || 'admin');
         
-        res.json({ success: true, count: seeds.length });
+        res.json({ success: true, count: stats.totalSeeds });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Upload custom seeddb.bin
 app.post('/api/seeds/upload', upload.single('seeddb'), async (req, res) => {
     try {
         if (!req.file) {
@@ -741,60 +493,28 @@ app.post('/api/seeds/upload', upload.single('seeddb'), async (req, res) => {
             return res.status(400).json({ success: false, error: 'Invalid seeddb.bin file' });
         }
         
-        // Merge with existing seeds
-        let existingSeeds = readDB(DB_FILES.seeds);
-        const existingIds = new Set(existingSeeds.map(s => s.titleId));
-        
-        let added = 0;
-        for (const seed of newSeeds) {
-            if (!existingIds.has(seed.titleId)) {
-                existingSeeds.push(seed);
-                added++;
-            }
-        }
-        
-        writeDB(DB_FILES.seeds, existingSeeds);
+        const added = seedsDB.bulkInsert(newSeeds);
         fs.unlinkSync(req.file.path);
+        
+        const stats = seedsDB.getStats();
         
         addLog('SEEDS_UPLOADED', {
             newSeeds: newSeeds.length,
             added,
-            total: existingSeeds.length,
+            total: stats.totalSeeds,
             ip: req.ip
         }, req.body.uploadedBy || 'Anonymous');
         
         res.json({
             success: true,
-            message: `Added ${added} new seeds (${existingSeeds.length} total)`
+            message: `Added ${added} new seeds (${stats.totalSeeds} total)`
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
-// Get seed statistics
-app.get('/api/seeds/stats', (req, res) => {
-    const seeds = readDB(DB_FILES.seeds);
-    const totalDownloads = seeds.reduce((sum, s) => sum + (s.downloadCount || 0), 0);
-    
-    // Most downloaded seeds
-    const topSeeds = [...seeds]
-        .filter(s => s.downloadCount > 0)
-        .sort((a, b) => (b.downloadCount || 0) - (a.downloadCount || 0))
-        .slice(0, 10);
-    
-    res.json({
-        success: true,
-        data: {
-            totalSeeds: seeds.length,
-            totalDownloads,
-            topSeeds
-        }
-    });
-});
-
-// Generate FBI seed QR code
-app.get('/api/seeds/:titleId/qr', async (req, res) => {
+app.get('/api/seeds/:titleId/qr', (req, res) => {
     try {
         const titleId = req.params.titleId.toUpperCase();
         const baseUrl = `${req.protocol}://${req.get('host')}`;
@@ -812,37 +532,6 @@ app.get('/api/seeds/:titleId/qr', async (req, res) => {
         res.status(500).json({ success: false, error: error.message });
     }
 });
-
-// Fetch and cache seeds from sources
-async function fetchAndCacheSeeds() {
-    let allSeeds = [];
-    
-    for (const url of SEED_SOURCES) {
-        try {
-            console.log(`Fetching seeds from: ${url}`);
-            const buffer = await downloadSeedDB(url);
-            const seeds = parseSeedDB(buffer);
-            console.log(`Found ${seeds.length} seeds`);
-            allSeeds = allSeeds.concat(seeds);
-        } catch (error) {
-            console.error(`Failed to fetch from ${url}:`, error.message);
-        }
-    }
-    
-    // Remove duplicates
-    const uniqueSeeds = [];
-    const seen = new Set();
-    
-    for (const seed of allSeeds) {
-        if (!seen.has(seed.titleId)) {
-            seen.add(seed.titleId);
-            uniqueSeeds.push(seed);
-        }
-    }
-    
-    writeDB(DB_FILES.seeds, uniqueSeeds);
-    return uniqueSeeds;
-}
 
 // ============================================
 // Error Handling
@@ -870,6 +559,31 @@ app.get('*', (req, res) => {
 // ============================================
 // Start Server
 // ============================================
+const dbDir = path.join(DATA_DIR, 'db');
+if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+
+// Initialize SQLite database
+initDatabase();
+
+// Check if migration is needed (JSON files exist but SQLite is empty)
+const dbFiles = ['files.json', 'logs.json', 'stats.json', 'seeds.json'];
+const needsMigration = dbFiles.some(f => fs.existsSync(path.join(dbDir, f)));
+
+if (needsMigration) {
+    console.log('Found JSON files, migrating to SQLite...');
+    migrateFromJSON(DATA_DIR);
+    
+    // Rename JSON files to .bak after migration
+    dbFiles.forEach(f => {
+        const jsonPath = path.join(dbDir, f);
+        if (fs.existsSync(jsonPath)) {
+            const bakPath = jsonPath + '.bak';
+            fs.renameSync(jsonPath, bakPath);
+            console.log(`Renamed ${f} to ${f}.bak`);
+        }
+    });
+}
+
 app.listen(PORT, () => {
     console.log(`
 ╔═══════════════════════════════════════════════╗
@@ -877,15 +591,9 @@ app.listen(PORT, () => {
 ║═══════════════════════════════════════════════║
 ║  Running on: http://localhost:${PORT}           ║
 ║  Admin Panel: http://localhost:${PORT}/admin.html║
+║  Database: SQLite (data/eshop.db)             ║
 ╚═══════════════════════════════════════════════╝
     `);
-    
-    // Initialize database files
-    Object.values(DB_FILES).forEach(file => {
-        if (!fs.existsSync(file)) {
-            writeDB(file, []);
-        }
-    });
     
     addLog('SERVER_START', { port: PORT });
 });
